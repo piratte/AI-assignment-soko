@@ -14,15 +14,15 @@ import cz.sokoban4j.simulation.board.compact.CTile;
 
 public class MySokobanAgent extends ArtificialAgent {
 
-	private List<EDirection> result;
+	// private List<EDirection> result;
 	
     private Map<String, Integer> visitedStatesWithLevel;
 
 	private Set<Tuple<Integer,Integer>> deadends;
 
-	private ArrayList<Tuple<Integer, Integer>> boxes;
+	// private ArrayList<Tuple<Integer, Integer>> boxes;
 
-	private int[][] heuristicValueBase;
+	private static int[][] heuristicValueBase;
 
 	private int depthLimit;
 
@@ -36,16 +36,13 @@ public class MySokobanAgent extends ArtificialAgent {
         }
 		
 		// INIT SEARCH
-		this.result = new ArrayList<EDirection>();
-		boolean solutionFound = false;
+        ArrayList<EDirection> result;
 
 		// create a dead-end database
 		this.deadends = createDeadendDB(board);
 
 		// pre-compute heuristic
-		this.heuristicValueBase = preComputeHeuristicBase(board);
-
-		this.boxes = getAllBoxesPositions(board);
+		heuristicValueBase = preComputeHeuristicBase(board);
 
         this.visitedStatesWithLevel = new HashMap<String, Integer>();
 		//this.visitedBoardsHashes = new HashSet<String>();
@@ -60,24 +57,162 @@ public class MySokobanAgent extends ArtificialAgent {
 		// FIRE THE SEARCH
 		long searchStartMillis = System.currentTimeMillis();
 
-		depthLimit = 70;
-		dfs(board, 0, 70,EActionType.INVALID, EDirection.NONE); // the number marks how deep we will search (the longest plan we will consider)
+		//depthLimit = 70;
+		//dfs(new SearchState(board, 0, 70, result), EActionType.INVALID, EDirection.NONE); // the number marks how deep we will search (the longest plan we will consider)
+
+        result = ida_star(board);
 		
 		runs++;
 		
 		long searchTime = System.currentTimeMillis() - searchStartMillis;
 		
-		printResults(searchTime);
+		printResults(searchTime, result);
 				
 		return result;
 	}
 
-	/*
-    private List<EDirection> ida_star(BoardCompact board) {
 
-    }*/
+    private ArrayList<EDirection> ida_star(BoardCompact board) {
+        depthLimit = computeHeuristicValue(board);
+        ResultStruct resStruct;
 
-	private ArrayList<Tuple<Integer, Integer>> getAllBoxesPositions(BoardCompact board) {
+        do {
+            resStruct = search(new SearchState(board, new ArrayList<EDirection>()), depthLimit);
+            depthLimit = resStruct.getT();
+        } while (!resStruct.found || depthLimit != Integer.MAX_VALUE);
+
+        if (resStruct.found) return resStruct.getMoves();
+        else return null;
+    }
+
+    private ResultStruct search(SearchState searchState, int depthLimit) {
+	    searchState.getCost();
+	    if (searchState.getCost() > depthLimit) {
+	        return new ResultStruct(searchState.getCost(), null, false);
+	    }
+
+        // check for box in a deadend
+        if (deadendCheck(searchState.getStateBoard())) return new ResultStruct(Integer.MAX_VALUE, null, false);
+
+	    // check for visited state
+        String boardCode = encodeBoard(searchState.getStateBoard());
+        // level is bigger -> more available steps
+        if (visitedStatesWithLevel.containsKey(boardCode) && visitedStatesWithLevel.get(boardCode) <= searchState.getCost()) {
+            return new ResultStruct(searchState.getCost(), null, false);
+        }
+        visitedStatesWithLevel.put(boardCode, searchState.getLevel());
+
+	    if (searchState.getStateBoard().isVictory()) {
+	        return new ResultStruct(searchState.getCost(), searchState.getMoves(), true);
+        }
+
+        int min = Integer.MAX_VALUE;
+        List<CAction> actions = getPossibleActions(searchState.getStateBoard());
+
+        ResultStruct result;
+        for (CAction action : actions) {
+            result = search(searchState.applyAction(action), depthLimit);
+            if (result.isFound()) return result;
+            if (result.getT() < min) min = result.getT();
+        }
+        return new ResultStruct(min, null, false);
+    }
+
+    static int computeHeuristicValue(BoardCompact board) {
+	    int result = 0;
+        for (int xInd = 0; xInd < board.width(); xInd++) {
+            for (int yInd = 0; yInd < board.height(); yInd++){
+                if (CTile.isSomeBox(board.tile(xInd,yInd))) {
+                    result += heuristicValueBase[xInd][yInd];
+                }
+            }
+        }
+        return result;
+    }
+
+    private int computeHeuristicValue(ArrayList<Tuple<Integer, Integer>> boxes) {
+        int result = 0;
+        for (Tuple<Integer, Integer> boxPos : boxes) {
+            result += heuristicValueBase[boxPos.x][boxPos.y];
+        }
+        return result;
+    }
+
+
+    private boolean dfs(SearchState searchState, EActionType previousType, EDirection previousDirection) {
+        BoardCompact board = searchState.getStateBoard().clone();
+        ArrayList<EDirection> result = searchState.getMoves();
+        //board.debugPrint();
+        int curHeurVal = searchState.getHeuristicVal();
+
+        if (searchState.getLevel() > depthLimit) return false; // DEPTH-LIMITED
+
+
+        if (previousType == EActionType.PUSH) {
+            // check for box in a deadend
+            if (deadendCheck(board, previousDirection)) return false;
+            curHeurVal = updateHeuristic(board, previousDirection, curHeurVal);
+        }
+
+
+        String boardCode = encodeBoard(board);
+        // level is bigger -> more available steps
+        if (visitedStatesWithLevel.containsKey(boardCode) && visitedStatesWithLevel.get(boardCode) <= searchState.getLevel()) { //(visitedBoardsHashes.contains(boardCode)) {
+            return false;
+        }
+        visitedStatesWithLevel.put(boardCode, searchState.getLevel());
+
+        // COLLECT POSSIBLE ACTIONS
+
+        List<CAction> actions = getPossibleActions(board);
+
+        // TRY ACTIONS
+        for (CAction action : actions) {
+            //System.err.println("Trying " + action);
+
+            // PERFORM THE ACTION
+            result.add(action.getDirection());
+            action.perform(board);
+
+            //System.err.println("Adding:");
+            //board.debugPrint();
+
+            // CHECK VICTORY
+            if (board.isVictory()) {
+                // SOLUTION FOUND!
+                return true;
+            }
+
+            // CONTINUE THE SEARCH
+            // TODO: continue from the least expensive state
+            if (dfs(new SearchState(board, searchState.getLevel() + 1, curHeurVal, moves), action.getType(), action.getDirection())) {
+                // SOLUTION FOUND!
+                return true;
+            }
+
+            board = reverseAction(board, action);
+        }
+        return false;
+    }
+
+    private List<CAction> getPossibleActions(BoardCompact board) {
+        List<CAction> actions = new ArrayList<CAction>(4);
+
+        for (CPush push : CPush.getActions()) {
+            if (push.isPossible(board)) {
+                actions.add(push);
+            }
+        }
+
+        for (CMove move : CMove.getActions()) {
+            if (move.isPossible(board)) {
+                actions.add(move);
+            }
+        }
+        return actions;
+    }
+
+    private ArrayList<Tuple<Integer, Integer>> getAllBoxesPositions(BoardCompact board) {
 		ArrayList<Tuple<Integer,Integer>> boxes = new ArrayList<Tuple<Integer, Integer>>(10);
 
 		for (int xInd = 0; xInd < board.width(); xInd++) {
@@ -112,7 +247,7 @@ public class MySokobanAgent extends ArtificialAgent {
 
 					// board tile is not a wall and the heuristic was not yet computed
 					if ((!CTile.isWall(board.tile(widthInd,heightInd))) && result[widthInd][heightInd] != -1) {
-						result = updateHeuristic(result, widthInd, heightInd);
+						result = updateHeuristicBase(result, widthInd, heightInd);
 					}
 
 				}
@@ -137,7 +272,7 @@ public class MySokobanAgent extends ArtificialAgent {
         return target;
     }
 
-    private int[][] updateHeuristic(int[][] input, int x, int y) {
+    private int[][] updateHeuristicBase(int[][] input, int x, int y) {
 		int[][] result = input.clone();
 		int curBest = result[x][y] + 1;
 		for (int d : new int[]{-1,1}) {
@@ -155,77 +290,12 @@ public class MySokobanAgent extends ArtificialAgent {
 		return result;
 	}
 
-	private boolean dfs(final BoardCompact inputBoard, int level, int heuristicVal, EActionType previousType, EDirection previousDirection) {
-        BoardCompact board = inputBoard.clone();
-		//board.debugPrint();
-		int curHeurVal = heuristicVal;
-
-		if (level > depthLimit) return false; // DEPTH-LIMITED
-
-
-        if (previousType == EActionType.PUSH) {
-        	// check for box in a deadend
-            if (deadendCheck(board, previousDirection)) return false;
-            curHeurVal = updateHeuristic(board, previousDirection, curHeurVal);
+	private boolean deadendCheck(final BoardCompact board) {
+        for (Tuple<Integer, Integer> pos : getAllBoxesPositions(board)) {
+            if (deadends.contains(pos)) return true;
         }
-
-
-		String boardCode = encodeBoard(board);
-        /* level is bigger -> more available steps */
-        if (visitedStatesWithLevel.containsKey(boardCode) && visitedStatesWithLevel.get(boardCode) <= level) { //(visitedBoardsHashes.contains(boardCode)) {
-            return false;
-		}
-		visitedStatesWithLevel.put(boardCode,level);
-
-		// COLLECT POSSIBLE ACTIONS
-
-		List<CAction> actions = new ArrayList<CAction>(4);
-
-		for (CPush push : CPush.getActions()) {
-			if (push.isPossible(board)) {
-				actions.add(push);
-			}
-		}
-
-		for (CMove move : CMove.getActions()) {
-			if (previousType == EActionType.MOVE && move.getDirection() == previousDirection.opposite()) {
-				// DO NOT CONSIDER THE ACTION THE MOVES BACK
-				continue;
-			}
-
-			if (move.isPossible(board)) {
-				actions.add(move);
-			}
-		}
-
-		// TRY ACTIONS
-		for (CAction action : actions) {
-			//System.err.println("Trying " + action);
-
-			// PERFORM THE ACTION
-			result.add(action.getDirection());
-			action.perform(board);
-
-			//System.err.println("Adding:");
-			//board.debugPrint();
-
-			// CHECK VICTORY
-			if (board.isVictory()) {
-				// SOLUTION FOUND!
-				return true;
-			}
-
-			// CONTINUE THE SEARCH
-			// TODO: continue from the least expensive state
-			if (dfs(board, level+1, curHeurVal,action.getType(), action.getDirection())) {
-				// SOLUTION FOUND!
-				return true;
-			}
-
-			board = reverseAction(board, action);
-		}
-		return false;
-	}
+        return false;
+    }
 
     private boolean deadendCheck(final BoardCompact board, EDirection previousDirection) {
         if (deadends.contains(getNewBoxPossition(board, previousDirection))) {
@@ -241,6 +311,7 @@ public class MySokobanAgent extends ArtificialAgent {
                 board.playerY + previousDirection.dY);
     }
 
+    /*
     private int updateHeuristic( final BoardCompact board, EDirection previousDirection, int curHeurVal) {
         // update heuristic
         boxes.remove(new Tuple<Integer, Integer>(board.playerX, board.playerY));
@@ -250,7 +321,7 @@ public class MySokobanAgent extends ArtificialAgent {
         curHeurVal -= heuristicValueBase[board.playerX][board.playerY];
         curHeurVal += heuristicValueBase[newBoxX][newBoxY];
         return curHeurVal;
-    }
+    }*/
 
 
     private Set<Tuple<Integer, Integer>> createDeadendDB(final BoardCompact board) {
@@ -277,17 +348,19 @@ public class MySokobanAgent extends ArtificialAgent {
         if (CTile.isWall(board.tile(widthInd+1,heightInd))) horizScore++;
         if (CTile.isWall(board.tile(widthInd,heightInd-1))) verticScore++;
         if (CTile.isWall(board.tile(widthInd,heightInd+1))) verticScore++;
-	    if (horizScore == 0 || verticScore == 0) return false;
+        //noinspection SimplifiableIfStatement for the sake of code readibility
+        if (horizScore == 0 || verticScore == 0) return false;
 
 	    return horizScore + verticScore > 1;
     }
 
+    /*
     private BoardCompact reverseAction(final BoardCompact board, CAction action) {
 
 		result.remove(result.size()-1);
 		action.reverse(board);
         return board;
-    }
+    }*/
 
 	private String encodeBoard(final BoardCompact board) {
 		StringBuilder sb = new StringBuilder();
@@ -305,7 +378,7 @@ public class MySokobanAgent extends ArtificialAgent {
 		return sb.toString();
 	}
 
-	private void printResults(long searchTime) {
+	private void printResults(long searchTime, ArrayList<EDirection> result) {
 		System.out.println("SEARCH TOOK:   " + searchTime + " ms");
 		//System.out.println("NODES IN SET:  " + visitedBoardsHashes.size());
 		System.out.println("NODES VISITED: " + visitedStatesWithLevel.size());
@@ -345,9 +418,9 @@ public class MySokobanAgent extends ArtificialAgent {
 	}
 	
 	public class Tuple<X, Y> { 
-	    public final X x; 
-	    public final Y y; 
-	    public Tuple(X x, Y y) { 
+	    final X x;
+	    final Y y;
+	    Tuple(X x, Y y) {
 	        this.x = x; 
 	        this.y = y; 
 	    }
@@ -367,7 +440,8 @@ public class MySokobanAgent extends ArtificialAgent {
 	            return false;
 	        }
 
-	        Tuple<X,Y> other_ = (Tuple<X,Y>) other;
+            //noinspection unchecked
+            Tuple<X,Y> other_ = (Tuple<X,Y>) other;
 
 	        // this may cause NPE if nulls are valid values for x or y. The logic may be improved to handle nulls properly, if needed.
 	        return other_.x.equals(this.x) && other_.y.equals(this.y);
@@ -383,6 +457,82 @@ public class MySokobanAgent extends ArtificialAgent {
 	    }
 	}
 
+    private static class SearchState {
+        private final BoardCompact stateBoard;
+        private ArrayList<EDirection> moves;
+
+        private SearchState(BoardCompact stateBoard, ArrayList<EDirection> moves) {
+            this.stateBoard = stateBoard;
+            this.moves = moves;
+        }
+
+        BoardCompact getStateBoard() {
+            return stateBoard;
+        }
+
+        int getLevel() {
+            return moves.size();
+        }
+
+        int getHeuristicVal() {
+            return computeHeuristicValue(this.stateBoard);
+        }
+
+        int getCost() {
+            return this.getHeuristicVal() + moves.size();
+        }
+
+        ArrayList<EDirection> getMoves() {
+            return moves;
+        }
+
+        public SearchState applyAction(CAction action) {
+            ArrayList<EDirection> newMoves = new ArrayList<EDirection>(moves.size());
+            for (int i = 0; i < moves.size(); i++) newMoves.add(moves.get(i));
+
+            BoardCompact newBoard = this.stateBoard.clone();
+            action.perform(newBoard);
+            return new SearchState(newBoard, newMoves);
+        }
+    }
+
+    private class ResultStruct {
+        // TODO: found = true <=> moves != null
+        boolean found;
+        int t;
+        ArrayList<EDirection> moves;
+
+        public ResultStruct(int t, ArrayList<EDirection> moves, boolean foundSolution) {
+            this.t = t;
+            this.moves = moves;
+            this.found = foundSolution;
+        }
+
+        public boolean isFound() {
+
+            return found;
+        }
+
+        public void setFound(boolean found) {
+            this.found = found;
+        }
+
+        public int getT() {
+            return t;
+        }
+
+        public void setT(int t) {
+            this.t = t;
+        }
+
+        public ArrayList<EDirection> getMoves() {
+            return moves;
+        }
+
+        public void setMoves(ArrayList<EDirection> moves) {
+            this.moves = moves;
+        }
+    }
 }
 
 
